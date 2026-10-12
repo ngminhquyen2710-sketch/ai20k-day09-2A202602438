@@ -121,17 +121,42 @@ Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline x
 ### Câu 6
 Dựa vào `leakage.json`: chia theo khung hình làm bao nhiêu trip bị chia cắt, so với chia theo trip? Vì sao điều này làm điểm kiểm thử đẹp một cách giả tạo?
 
-(trả lời ở đây)
+**1. Số liệu thực nghiệm từ `leakage.json` (trên tổng số 1019 khung hình thuộc 26 trip):**
+- **Chia theo khung hình (Random frame-level split 70/15/15):** Có **26/26 trip (100%)** bị phân mảnh nằm ở nhiều hơn một split (`per_frame_split_trips_straddling = 26`), và **toàn bộ 26/26 trip** đều có khung hình xuất hiện đồng thời ở cả tập Train lẫn tập Test (`per_frame_split_trips_in_both_train_and_test = 26`).
+- **Chia theo trip (Trip-level split của pipeline):** Có **0 trip bị chia cắt** (`per_trip_split_trips_straddling = 0`). Mỗi trip nằm trọn vẹn và duy nhất trong một split (Train 18 trips, Val 4 trips, Test 4 trips).
+
+**2. Vì sao chia theo khung hình làm điểm kiểm thử đẹp giả tạo (Data Leakage):**
+- Trong bài toán Computer Vision cho xe tự hành, các khung hình liên tiếp trích xuất từ video (cách nhau chỉ 0.5 giây) có độ tương quan hình ảnh cực kỳ cao (cùng ánh sáng, cùng thời tiết, cùng đoạn đường và các xe xung quanh).
+- Nếu chia theo khung hình, mô hình đã "học thuộc" cảnh nền của một chuyến đi trong tập Train, và khung hình ở tập Test chỉ là một biến thể xê dịch vài mét của cảnh đó. Mô hình chỉ đang ghi nhớ cục bộ (memorization) thay vì học tính khái quát hóa (generalization). Kết quả là điểm kiểm thử (loss, mAP) trên tập Test cao một cách giả tạo, nhưng mô hình sẽ thất bại hoàn toàn khi đem triển khai thực tế trên một chuyến đi mới lạ.
 
 ### Câu 7
 Vì sao `dataset_version` là **băm nội dung** chứ không phải ngày giờ hay số đếm? Hai lần chạy liên tiếp cho kết quả gì? Vì sao `dataset_version` của bạn **khác** bạn bè dù cùng dữ liệu (liên hệ MSSV)?
 
-(trả lời ở đây)
+**1. Vì sao `dataset_version` là băm nội dung (Content-addressed Hash):**
+- **Đảm bảo tính tái lập (Reproducibility & Idempotency):** Băm nội dung biến dataset thành một giá trị định danh bất biến (Content-addressable). Cùng một tập dữ liệu đầu vào đã lọc và cùng cách phân chia sẽ luôn sinh ra cùng một mã băm duy nhất. Nếu dùng ngày giờ (timestamp) hoặc số đếm tự tăng (auto-increment), mỗi lần chạy lại pipeline (dù không đổi một byte dữ liệu nào) hệ thống sẽ tạo ra một version mới, làm rác kho lưu trữ và mất khả năng so sánh/chống trùng lặp giữa các lần huấn luyện mô hình.
+- **Kết quả hai lần chạy liên tiếp:** Cho ra chính xác cùng một mã băm `dataset_version` (`0e05ca3103f7`).
+
+**2. Vì sao `dataset_version` của tôi khác bạn bè dù cùng bộ dữ liệu:**
+- Trong model `gold_dataset_frames.sql`, phép gán split cho các trip sử dụng `LAB_STUDENT_ID` (MSSV của tôi là `2A202602438`) làm muối băm (salt): `order by md5(trip_id || '{{ env_var("LAB_STUDENT_ID", "") }}')`.
+- Mỗi sinh viên có một MSSV khác nhau, dẫn đến chuỗi MD5 khác nhau, khiến thứ tự xếp hạng và phân phối 26 trip vào 3 tập train/val/test của mỗi sinh viên là hoàn toàn khác biệt. Tập khung hình ở các split khác nhau dẫn tới file `manifest.json` khác nhau, sinh ra mã băm `dataset_version` độc nhất vô nhị cho từng người.
 
 ### Câu 8
 Đọc phần `lineage` trong `manifest.json` của dataset bạn. Trả lời "dataset này được tạo từ dữ liệu nào?" bằng chính nội dung đó. Nếu một người hỏi 3 tháng sau, thông tin nào giúp tái tạo lại đúng dataset này?
 
-(trả lời ở đây)
+**1. Trả lời "dataset này được tạo từ dữ liệu nào?" dựa trên `manifest.json` (phiên bản `0e05ca3103f7`):**
+Dataset được tạo trực tiếp từ các phiên bản bảng Delta và tệp video gốc sau:
+- **Tầng Bronze:** `bronze.raw_telemetry_a` (version 0), `bronze.raw_telemetry_b` (version 0), `bronze.trips_raw` (version 0), `bronze.video_files` (version 1).
+- **Tầng Silver:** `silver.frames` (version 27), `silver.telemetry` (version 0), `silver.frames_flagged` (version 0), `silver.frame_telemetry` (version 0).
+- **Video gốc (SHA256):**
+  - Drive A: `636ba1a98dfc5ba665d1c935e1d2064e69f4df360ff9ffbd15795957d5e7e9aa`
+  - Drive B: `bfa62703f645ff77a8578ae3fc74a00881140d38a404d43c8e2af265bbee9fdc`
+- **Bộ quy tắc áp dụng (`rules`):** Loại bỏ khung hình thỏa mãn `is_black`, `is_blurry`, `is_near_dup`, `not sync_ok`; phân chia split theo trip phân tầng theo drive.
+
+**2. Các thông tin giúp tái tạo chính xác 100% dataset này sau 3 tháng:**
+- Hai tệp video và các tệp telemetry gốc có mã SHA256 khớp tuyệt đối với thông tin lưu ở `lineage`.
+- Số phiên bản cụ thể (version) của các bảng Delta tại thời điểm tạo (cho phép dùng tính năng Delta Lake Time Travel để query lại đúng trạng thái đó).
+- Giá trị biến môi trường `LAB_STUDENT_ID=2A202602438` (đóng vai trò seed muối băm quyết định cách phân bố split).
+- Tỷ lệ phân chia split (Train 70%, Val 15%, Test 15%) và các ngưỡng lọc chất lượng đã cấu hình.
 
 ## Bước 5 · Điều phối và phục vụ
 
