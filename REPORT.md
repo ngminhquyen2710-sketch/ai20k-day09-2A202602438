@@ -7,12 +7,12 @@
 | Họ và tên | Nguyễn Minh Quyền |
 | MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | 2A202602438 |
 | GitHub | ngminhquyen2710-sketch |
-| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `<điền: trip-xxxxx>` |
+| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | trip-06667 |
 
 ## Kết quả cuối
 
-- `dataset_version` của bạn: `<điền>`  (phải khớp `report/evidence/run_summary.json`)
-- Số khung hình train / val / test của bạn: `<điền>`
+- `dataset_version` của bạn: `0e05ca3103f7`  (phải khớp `report/evidence/run_summary.json`)
+- Số khung hình train / val / test của bạn: `693 train / 177 val / 149 test` (tổng 1019)
 - `report/verify.txt`: tạo bằng `python3 scripts/check_submission.py --save-verify` (phải có `27/27 checks passed`).
 - Ảnh chụp trong `report/screenshots/`: `airflow_graph.png`, `minio_lake.png`, `metabase_dashboard.png`, và ảnh bài tập sập/chạy lại (log task đỏ thấy trip của bạn).
 
