@@ -5,9 +5,9 @@
 | | |
 |---|---|
 | Họ và tên | Nguyễn Minh Quyền |
-| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | 2A202602438 |
+| MSSV | 2A202602438 |
 | GitHub | ngminhquyen2710-sketch |
-| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | trip-06667 |
+| Trip dùng cho bài tập sập và chạy lại | trip-06667 |
 
 ## Kết quả cuối
 
