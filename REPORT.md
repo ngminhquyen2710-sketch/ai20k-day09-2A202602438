@@ -163,21 +163,58 @@ Dataset được tạo trực tiếp từ các phiên bản bảng Delta và t�
 ### Câu 9
 Mô tả chính xác điều xảy ra khi trip của bạn sập rồi chạy lại: bao nhiêu task chuyển đỏ, bao nhiêu task `upstream_failed`, bạn clear gì, dữ liệu có nhân đôi không, `dataset_version` có đổi không? Bằng chứng (ảnh, số) là gì?
 
-(trả lời ở đây)
+**1. Diễn biến khi trip được chỉ định (`trip-06667`) sập và chạy lại:**
+- **Số task chuyển đỏ:** Khi thiết lập `LAB_FAIL_ONCE=trip-06667`, trong cụm dynamic mapping 26 task `silver_frames`, có đúng **1 task** chuyển sang màu **đỏ (FAILED)** tương ứng với partition `trip-06667`. Log của task báo lỗi có kiểm soát: `simulated crash while extracting trip-06667`. 25 task trích xuất khác của 25 trip còn lại vẫn hoàn thành bình thường (màu xanh).
+- **Số task bị `upstream_failed`:** Toàn bộ **7 task** hạ nguồn phụ thuộc vào `silver_frames` bao gồm: `dbt_run_silver`, `dbt_test_silver`, `dbt_run_gold`, `dbt_test_gold`, `publish_lake`, `export_dataset`, `publish_warehouse` bị chặn thực thi và chuyển sang trạng thái **`upstream_failed` (màu cam)**.
+- **Thao tác xử lý (Clear):** Trên giao diện Airflow Graph, ta chọn task đỏ duy nhất (`silver_frames` của `trip-06667`) và nhấn **Clear** (chọn `downstream = true`). Task này được lên lịch chạy lại thành công (xanh); ngay sau đó Airflow tự động giải phóng trigger và tuần tự chạy thành công cả 7 task downstream (toàn bộ DAG chuyển xanh hoàn toàn).
+- **Dữ liệu có bị nhân đôi không:** **Hoàn toàn KHÔNG**. Pipeline sử dụng cơ chế Delta Lake `replaceWhere = "trip_id = 'trip-06667'"` (ghi đè theo partition). Khi chạy lại lần thứ hai, các bản ghi cũ của `trip-06667` được thay thế nguyên tử (atomic overwrite), không xảy ra tình trạng duplicate rows.
+- **`dataset_version` có đổi không:** **KHÔNG ĐỔI**, vẫn giữ nguyên chính xác là `0e05ca3103f7`.
+- **Bằng chứng số liệu & hình ảnh:** 
+  - Toàn bộ 27/27 kiểm tra chất lượng vẫn đạt PASS tuyệt đối (`verify_all_passed: true`).
+  - Tổng số lượng khung hình vẫn cố định 1019 khung hình (693 train / 177 val / 149 test), khớp 100% với `report/evidence/run_summary.json`.
+  - Ảnh chụp màn hình: `report/screenshots/airflow_task_crash.png` (log task đỏ chứa `simulated crash while extracting trip-06667`) và `report/screenshots/airflow_graph.png` (toàn bộ DAG xanh).
 
 ### Câu 10
 Nâng từ 2 drive lên **500 xe mỗi ngày**: ba thành phần nào của pipeline này sẽ vỡ đầu tiên, và bạn thay bằng gì (nối với slide 12, 22, 23)?
 
-(trả lời ở đây)
+Khi quy mô tăng lên 500 xe/ngày (~hàng nghìn giờ video, hàng triệu khung hình và hàng chục GB telemetry/ngày), ba thành phần sau sẽ đổ vỡ đầu tiên:
+1. **Bộ giải mã và trích xuất video cục bộ (FFmpeg / OpenCV trên worker đơn lẻ - Slide 23, 24):**
+   - *Vấn đề:* Tác vụ giải mã video (decode) và trích xuất đặc trưng hình ảnh (dHash, Laplacian variance) tiêu tốn năng lực CPU/RAM cực lớn. Hiện tại Airflow chạy tuần tự/cục bộ trên 1 container worker với cấu hình `max_active_tis_per_dagrun=1`. Với 500 xe, quá trình này sẽ mất hàng chục đến hàng trăm giờ để hoàn tất và đối mặt nguy cơ OOM crash ngay lập tức.
+   - *Giải pháp thay thế (Slide 23):* Thay thế bằng cụm tính toán phân tán (Distributed compute cluster) chuyên dụng cho media processing như **Ray** hoặc sử dụng **Airflow Celery/KubernetesExecutor** kết hợp cơ chế worker autoscaling (hàng trăm pod xử lý song song), hoặc đẩy sang dịch vụ serverless batch (như AWS Batch).
+2. **Engine chuyển đổi dữ liệu DuckDB in-process cục bộ (Slide 22):**
+   - *Vấn đề:* DuckDB là in-process engine lưu trên 1 file `lakehouse.duckdb`. Nó bị giới hạn chặt chẽ bởi bộ nhớ RAM của một máy vật lý và cơ chế khóa file đơn (single-writer lock). Khi bảng telemetry đạt hàng trăm triệu dòng và dbt thực hiện các phép join event-time phức tạp giữa video và telemetry, DuckDB sẽ cạn kiệt tài nguyên RAM và xung đột truy cập ghi đồng thời (concurrency conflict).
+   - *Giải pháp thay thế (Slide 12, 22):* Thay DuckDB bằng các công cụ tính toán phân tán MPP/Lakehouse như **Apache Spark (PySpark / Delta-Spark)**, **Trino/Presto**, hoặc **Databricks**, kết hợp cùng dbt adapter tương ứng (`dbt-spark` / `dbt-databricks`) để chia nhỏ và xử lý song song trên nhiều worker node.
+3. **Kho lưu trữ MinIO single-node và Postgres Data Warehouse (Slide 12, 16):**
+   - *Vấn đề:* MinIO chạy trên 1 container gắn volume đĩa cục bộ sẽ nhanh chóng cạn kiệt dung lượng đĩa cứng (hàng chục TB video gốc và delta parquet mỗi tuần) và nghẽn băng thông I/O đường truyền. Postgres truyền thống cũng sẽ gặp trần chịu tải (bottleneck) khi phải đóng vai trò vừa là data warehouse lưu hàng triệu bản ghi vừa phục vụ truy vấn BI đồng thời từ người dùng.
+   - *Giải pháp thay thế (Slide 12, 16):* Chuyển vùng hạ tầng lake sang dịch vụ lưu trữ đối tượng đám mây chuẩn cấp doanh nghiệp (**AWS S3 / Google Cloud Storage**) tích hợp Lifecycle policies (chuyển video cũ sang Cold/Glacier tier để tiết kiệm chi phí); đồng thời thay Postgres bằng Cloud Data Warehouse phân tán có kiến trúc tách rời tính toán và lưu trữ (Decoupled Compute & Storage) như **Snowflake**, **Google BigQuery**, hoặc **AWS Redshift**.
 
 ## Câu hỏi riêng của bạn trên Metabase
 
 Câu SQL bạn thêm vào dashboard và điều nó cho biết:
 
-(trả lời ở đây)
+```sql
+select 
+    trip_id,
+    drive_id,
+    lighting,
+    conditions,
+    frames as tong_khung,
+    frames_kept as khung_giu_lai,
+    (frames - frames_kept) as khung_bi_loai,
+    round(100.0 * (frames - frames_kept) / frames, 2) as ty_le_loai_pct,
+    split
+from marts.trip_summary
+order by ty_le_loai_pct desc;
+```
+
+**Điều câu truy vấn này cho biết:**
+- Câu SQL trích xuất từ bảng `marts.trip_summary` nhằm tính toán tỷ lệ khung hình bị loại bỏ (`ty_le_loai_pct`) trên từng chuyến xe (trip), đồng thời phân tầng theo điều kiện ánh sáng (`lighting`) và điều kiện đường sá/thời tiết (`conditions`).
+- **Ý nghĩa thực tiễn đối với kỹ sư dữ liệu / ML:** Giúp đội ngũ giám sát chất lượng thu thập dữ liệu xác định ngay những chuyến xe có tỷ lệ hao hụt cao bất thường. Chẳng hạn, các trip đi qua hầm tối hoặc dừng xe kéo dài (như chờ đèn đỏ) sẽ có tỷ lệ loại bỏ rất cao do rơi vào bộ lọc khung đen (`is_black`) hoặc khung gần trùng lặp (`is_near_dup`). Ngược lại, các trip di chuyển liên tục trên cao tốc ban ngày giữ lại được >95% số khung. Từ đó, ta có cơ sở để tối ưu hóa tần số lấy mẫu FPS của camera và điều chỉnh lộ trình thu thập dữ liệu cho các đợt chạy xe tiếp theo.
 
 ## Nhìn lại
 
 Điều bạn thấy bất ngờ nhất, điều gì còn chưa rõ, và một lỗi dữ liệu mà bạn nghĩ pipeline **chưa** bắt được (nếu có). Tối đa 8 dòng.
 
-(trả lời ở đây)
+- **Bất ngờ nhất:** Cơ chế phân chia split theo cấp độ chuyến đi (Trip-level split) bảo vệ dataset triệt để đến mức triệt tiêu hoàn toàn 100% rò rỉ dữ liệu (từ 26/26 trip bị rò rỉ khi split theo frame ngẫu nhiên giảm về 0 trip), đảm bảo mô hình Computer Vision học đúng tính khái quát hóa thay vì học vẹt cảnh quan.
+- **Chưa rõ:** Độ trễ pha tối ưu khi đồng bộ telemetry tần số cao (10-50Hz) với khung hình tần số thấp (2 FPS) tại các thời điểm xe tăng tốc đột ngột hoặc đánh lái gắt; phép nội suy/join `asof` có thể gặp độ lệch nhỏ nếu đồng hồ phần cứng bị trôi phi tuyến tính trong hành trình dài.
+- **Lỗi pipeline chưa bắt được:** Hiện tượng **chói loá cục bộ quá mức (extreme glare / overexposure)** do camera chiếu thẳng vào mặt trời hoặc đèn pha xe ngược chiều ban đêm làm trắng xoá toàn bộ góc nhìn trung tâm. Khung hình này vẫn có độ sáng cao (không phải khung đen) và vẫn có thể có độ tương phản cạnh cục bộ (vượt qua test blur), nhưng thông tin làn đường thực tế đã bị mất hoàn toàn, có thể gây nguy hiểm nếu đưa vào tập huấn luyện xe tự hành.
