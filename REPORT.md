@@ -84,18 +84,37 @@ Thí nghiệm chứng minh Cổng chất lượng đóng vai trò như một **h
 ### Câu 4
 Dựa vào `idempotency.json`: số dòng trước và sau hai lần chạy lại, và khi ghi kiểu `append`. Vì sao Delta `overwrite` theo partition (một trip) an toàn hơn xoá rồi ghi lại, nhất là khi giữa chừng có lỗi?
 
-(trả lời ở đây)
+**1. Số liệu thực nghiệm từ `idempotency.json` (thí nghiệm trên `trip-00003`):**
+- **Trước khi chạy lại:** Bảng có `1246` dòng, mã băm dấu vân tay (fingerprint) là `6c7480dfde7e`.
+- **Sau 2 lần chạy lại partition:** Bảng vẫn giữ nguyên chính xác `1246` dòng, dấu vân tay không đổi `6c7480dfde7e` (`unchanged = true`).
+- **Khi mô phỏng ghi sai kiểu `append`:** Số dòng của trip thử nghiệm bị nhân đôi từ 60 dòng lên `120` dòng (`append_variant_rows_after_two_runs = 120`), gây rác và trùng lặp dữ liệu nghiêm trọng.
+
+**2. Vì sao Delta `overwrite` theo partition an toàn hơn cơ chế xoá rồi ghi lại (delete-then-insert):**
+- **Đảm bảo tính nguyên tử (ACID Atomicity):** Trong Delta Lake, cơ chế overwrite theo partition (`replaceWhere`) sẽ ghi toàn bộ các file Parquet mới vào bộ nhớ trước khi thực hiện một commit nguyên tử duy nhất vào transaction log (`_delta_log`). Nếu có sự cố (crash container, lỗi mạng, OOM) giữa chừng khi đang trích xuất, giao dịch bị hủy và bảng vẫn giữ nguyên trạng thái phiên bản cũ hợp lệ mà không bị hỏng.
+- **Tránh mất dữ liệu (Zero Data Loss Window):** Nếu dùng phương pháp "xóa trước rồi ghi sau", khoảng thời gian giữa lệnh delete và insert là lỗ hổng chết người; nếu tiến trình chết giữa chừng, toàn bộ partition của trip đó sẽ bị mất vĩnh viễn, khiến các pipeline hạ tầng downstream đọc phải bảng rỗng.
+- **Cô lập tác vụ (Partition Isolation):** Lệnh overwrite theo partition chỉ tác động cục bộ lên đúng thư mục/file của trip đó, không can thiệp hay khóa bảng (locking) đối với 25 trip còn lại đang chạy song song.
 
 ### Câu 5
 Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline xử lý khác nhau ra sao, bạn có đồng ý không? Dựa vào `threshold.json`: nếu chọn ngưỡng 0, 2, 6 thì bao nhiêu khung bị coi là trùng ở mỗi drive? Bạn chọn ngưỡng nào, vì sao, và ngưỡng đó phụ thuộc vào tốc độ xe thế nào?
 
+**1. Khung hình đen vs Khung hình tối và cách xử lý:**
+- **Khung hình đen (`is_black`):** Có độ sáng trung bình cực thấp (mean luma < 12.0), xuất phát từ lỗi phần cứng (nắp ống kính chưa mở, camera mất tín hiệu phơi sáng). Khung đen chứa 0% thông tin hình ảnh. Pipeline **loại bỏ hoàn toàn (drop)** khỏi tập Gold.
+- **Khung hình tối (`is_dark` / `toi_giu_lai`):** Có ánh sáng yếu nhưng vẫn nhìn thấy được (xe chui qua hầm, bóng râm cây cối, chạng vạng). Vẫn chứa các đường nét quan trọng (vạch kẻ đường, đèn xe khác, biển báo). Pipeline **gắn cờ cảnh báo nhưng giữ lại** (drive_b có tới 61 khung tối được giữ lại, drive_a có 4 khung).
+- **Tôi hoàn toàn đồng ý** với thiết kế này: Mô hình lái xe tự hành bắt buộc phải nhận diện được vật cản trong điều kiện ánh sáng yếu/ban đêm; việc giữ lại khung tối giúp mô hình học được phân phối thực tế, trong khi loại khung đen giúp tránh làm loãng gradient.
+
+**2. Bảng số lượng khung trùng theo ngưỡng dHash từ `threshold.json`:**
+
 | dHash khác tối đa | số khung trùng, drive A | số khung trùng, drive B |
 |---|---|---|
-| 0 | | |
-| 2 | | |
-| 6 | | |
+| 0 | 61 | 8 |
+| 2 | 149 | 53 |
+| 6 | 363 | 244 |
 
-(trả lời ở đây)
+**3. Lựa chọn ngưỡng và sự phụ thuộc vào tốc độ xe:**
+- **Tôi chọn ngưỡng 2 bit (như pipeline đang dùng):** 
+  - Ngưỡng 0 bit quá khắt khe: do nhiễu cảm biến (sensor noise) hoặc nén video, hai khung xe đứng yên vẫn có thể lệch 1 bit, dẫn đến bỏ sót nhiều khung trùng (A chỉ bắt 61 khung thay vì 149).
+  - Ngưỡng 6 bit quá lỏng: loại bỏ quá mức (363/602 khung ở A, 244/644 ở B, mất hơn 50% dataset), làm mất cả những khung hình xe đang di chuyển bình thường có cảnh quan thay đổi nhẹ. Ngưỡng 2 là điểm cân bằng lý tưởng (sweet spot).
+- **Phụ thuộc vào vận tốc xe:** Khi xe chạy chậm hoặc dừng đèn đỏ (drive A có tốc độ trung bình thấp hơn ~41 km/h và bị camera đứng hình 6s), cảnh vật giữa hai khung hình liên tiếp (cách nhau 0.5s) gần như y hệt nhau, khoảng cách dHash rất nhỏ ($\le 2$ bit) nên số khung trùng rất cao (149 khung). Khi xe chạy nhanh trên xa lộ (drive B có tốc độ cao 71-100 km/h), cảnh quan dịch chuyển rất nhanh tạo ra biến động dHash lớn, do đó số khung bị coi là trùng ít hơn nhiều (chỉ 53 khung).
 
 ## Bước 4 · Gold
 
