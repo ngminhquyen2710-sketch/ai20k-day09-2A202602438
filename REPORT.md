@@ -21,7 +21,16 @@
 ### Câu 1
 Liệt kê **ít nhất 4 khác biệt** giữa telemetry nguồn A và nguồn B mà bạn thấy ở bronze. Vì sao pipeline giữ **mỗi nguồn một bảng bronze** và để mọi cột ở dạng chữ, thay vì gộp và ép kiểu ngay?
 
-(trả lời ở đây)
+Dựa vào dữ liệu thô trích xuất từ hai bảng bronze (`raw_telemetry_a` và `raw_telemetry_b`), có các khác biệt rõ rệt sau:
+1. **Định dạng thời gian:** Nguồn A dùng chuẩn chuỗi ISO 8601 UTC (`ts_utc`, ví dụ `2025-10-07T08:00:00.014Z`), trong khi Nguồn B dùng Unix timestamp tính bằng mili-giây (`timestamp_ms`, ví dụ `1759933801509`).
+2. **Đơn vị và tên cột vận tốc:** Nguồn A đặt tên cột là `speed_mps` đo bằng mét/giây (m/s); Nguồn B đặt tên là `spd_kmh` đo bằng km/h.
+3. **Tên cột và thang đo điều khiển (Ga/Phanh):** Nguồn A dùng `gas` và `brake` theo thang chuẩn hóa [0.0, 1.0]; Nguồn B dùng `throttle_pct` và `brake_pct` theo thang phần trăm [0, 100%].
+4. **Quy ước đặt tên cột GPS và cảm biến:** Nguồn A dùng tên ngắn gọn (`lat`, `lon`, `alt_m`, `heading_deg`, `acc_x`, `acc_y`, `steer`), còn Nguồn B dùng tên khác (`latitude`, `longitude`, `altitude`, `hdg`, `ax`, `ay`, `steering`). Ngoài ra, bảng `bronze_video_files` cho thấy video B bị lệch đồng hồ `telemetry_clock_offset_ms = 1500 ms` so với telemetry, trong khi A có offset = 0.
+
+Pipeline giữ **mỗi nguồn một bảng bronze riêng biệt và giữ nguyên dạng chữ (raw string)** vì tuân thủ nguyên lý Medallion Architecture:
+- **Bảo toàn nguyên bản (Raw Data Fidelity):** Tầng Bronze đóng vai trò là "Single Source of Truth" bất biến. Việc giữ kiểu chuỗi giúp ingest an toàn 100% bản ghi mà không bao giờ bị crash bởi lỗi cú pháp, ô trống, dữ liệu dị thường (anomaly) hay ép kiểu thất bại.
+- **Cách ly Schema Drift:** Mỗi nguồn thiết bị/cảm biến từ các nhà cung cấp khác nhau có cấu trúc độc lập. Không gộp sớm giúp việc thay đổi schema ở một nguồn không làm vỡ các luồng của nguồn khác.
+- **Khả năng tái xử lý (Replay/Audit):** Dữ liệu gốc được bảo toàn nguyên vẹn cho phép ta thử nghiệm, sửa đổi logic chuẩn hóa hoặc backfill dữ liệu ở tầng Silver bất kỳ lúc nào mà không bị mất mát thông tin ban đầu.
 
 ## Bước 2 · Silver telemetry
 
